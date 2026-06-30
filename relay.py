@@ -11,7 +11,7 @@ import threading
 
 import requests
 import websocket as ws_client_lib
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
 
 app = FastAPI(title="NYO Binance Relay")
@@ -33,23 +33,24 @@ def health():
     return {"status": "ok", "time": time.time()}
 
 @app.api_route("/relay/rest/{host_key}/{path:path}", methods=["GET", "POST", "DELETE", "PUT"])
-async def rest_proxy(host_key: str, path: str, request: "Request" = None):
-    from fastapi import Request as FastAPIRequest
-    req: FastAPIRequest = request
+async def rest_proxy(host_key: str, path: str, req: Request):
     base = BINANCE_REST_HOSTS.get(host_key)
     if not base:
         return JSONResponse({"error": "host_key invalido, usa spot/futures/testnet"}, status_code=400)
     url = base + "/" + path
     params = dict(req.query_params)
     headers = {}
-    if "x-mbx-apikey" in {k.lower() for k in req.headers.keys()}:
-        for k, v in req.headers.items():
-            if k.lower() == "x-mbx-apikey":
-                headers["X-MBX-APIKEY"] = v
+    for k, v in req.headers.items():
+        if k.lower() == "x-mbx-apikey":
+            headers["X-MBX-APIKEY"] = v
     try:
         body = await req.body()
         r = requests.request(req.method, url, params=params, headers=headers, data=body if body else None, timeout=15)
-        return JSONResponse(content=r.json() if r.content else {}, status_code=r.status_code)
+        try:
+            content = r.json()
+        except Exception:
+            content = {"raw": r.text}
+        return JSONResponse(content=content, status_code=r.status_code)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=502)
 
