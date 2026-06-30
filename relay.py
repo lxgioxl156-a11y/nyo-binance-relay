@@ -1,7 +1,5 @@
 """
-NYO Binance Relay
-Proxy ligero para evitar el bloqueo geografico (HTTP 451) de Binance hacia
-datacenters en EE.UU. (como Hugging Face Spaces free tier).
+NYO Binance Relay - v2: async httpx (no bloqueante) + exception handler global
 """
 import asyncio
 import json
@@ -9,12 +7,16 @@ import os
 import time
 import threading
 
-import requests
+import httpx
 import websocket as ws_client_lib
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
 
 app = FastAPI(title="NYO Binance Relay")
+
+@app.exception_handler(Exception)
+async def all_exceptions_handler(request: Request, exc: Exception):
+    return JSONResponse(status_code=500, content={"error": str(exc), "type": type(exc).__name__})
 
 BINANCE_REST_HOSTS = {
     "spot": "https://api.binance.com",
@@ -23,6 +25,18 @@ BINANCE_REST_HOSTS = {
 }
 BINANCE_WS_BASE = "wss://stream.binance.com:9443/stream"
 BINANCE_FUTURES_WS_BASE = "wss://fstream.binance.com/ws"
+
+http_client: httpx.AsyncClient = None
+
+@app.on_event("startup")
+async def startup():
+    global http_client
+    http_client = httpx.AsyncClient(timeout=15.0)
+
+@app.on_event("shutdown")
+async def shutdown():
+    if http_client:
+        await http_client.aclose()
 
 @app.get("/")
 def root():
@@ -43,16 +57,13 @@ async def rest_proxy(host_key: str, path: str, req: Request):
     for k, v in req.headers.items():
         if k.lower() == "x-mbx-apikey":
             headers["X-MBX-APIKEY"] = v
+    body = await req.body()
+    r = await http_client.request(req.method, url, params=params, headers=headers, content=body if body else None)
     try:
-        body = await req.body()
-        r = requests.request(req.method, url, params=params, headers=headers, data=body if body else None, timeout=15)
-        try:
-            content = r.json()
-        except Exception:
-            content = {"raw": r.text}
-        return JSONResponse(content=content, status_code=r.status_code)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=502)
+        content = r.json()
+    except Exception:
+        content = {"raw": r.text}
+    return JSONResponse(content=content, status_code=r.status_code)
 
 @app.websocket("/relay/ws/{streams:path}")
 async def ws_proxy(websocket: WebSocket, streams: str):
