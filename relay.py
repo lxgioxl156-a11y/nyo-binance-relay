@@ -1,22 +1,19 @@
 """
-NYO Binance Relay - v2: async httpx (no bloqueante) + exception handler global
+NYO Binance Relay - v3: sin dependencia de startup event, try/except inline con traceback completo
 """
 import asyncio
 import json
 import os
 import time
 import threading
+import traceback
 
 import httpx
 import websocket as ws_client_lib
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 app = FastAPI(title="NYO Binance Relay")
-
-@app.exception_handler(Exception)
-async def all_exceptions_handler(request: Request, exc: Exception):
-    return JSONResponse(status_code=500, content={"error": str(exc), "type": type(exc).__name__})
 
 BINANCE_REST_HOSTS = {
     "spot": "https://api.binance.com",
@@ -25,18 +22,6 @@ BINANCE_REST_HOSTS = {
 }
 BINANCE_WS_BASE = "wss://stream.binance.com:9443/stream"
 BINANCE_FUTURES_WS_BASE = "wss://fstream.binance.com/ws"
-
-http_client: httpx.AsyncClient = None
-
-@app.on_event("startup")
-async def startup():
-    global http_client
-    http_client = httpx.AsyncClient(timeout=15.0)
-
-@app.on_event("shutdown")
-async def shutdown():
-    if http_client:
-        await http_client.aclose()
 
 @app.get("/")
 def root():
@@ -48,22 +33,27 @@ def health():
 
 @app.api_route("/relay/rest/{host_key}/{path:path}", methods=["GET", "POST", "DELETE", "PUT"])
 async def rest_proxy(host_key: str, path: str, req: Request):
-    base = BINANCE_REST_HOSTS.get(host_key)
-    if not base:
-        return JSONResponse({"error": "host_key invalido, usa spot/futures/testnet"}, status_code=400)
-    url = base + "/" + path
-    params = dict(req.query_params)
-    headers = {}
-    for k, v in req.headers.items():
-        if k.lower() == "x-mbx-apikey":
-            headers["X-MBX-APIKEY"] = v
-    body = await req.body()
-    r = await http_client.request(req.method, url, params=params, headers=headers, content=body if body else None)
     try:
-        content = r.json()
+        base = BINANCE_REST_HOSTS.get(host_key)
+        if not base:
+            return JSONResponse({"error": "host_key invalido, usa spot/futures/testnet"}, status_code=400)
+        url = base + "/" + path
+        params = dict(req.query_params)
+        headers = {}
+        for k, v in req.headers.items():
+            if k.lower() == "x-mbx-apikey":
+                headers["X-MBX-APIKEY"] = v
+        body = await req.body()
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.request(req.method, url, params=params, headers=headers, content=body if body else None)
+        try:
+            content = r.json()
+        except Exception:
+            content = {"raw": r.text[:500]}
+        return JSONResponse(content=content, status_code=r.status_code)
     except Exception:
-        content = {"raw": r.text}
-    return JSONResponse(content=content, status_code=r.status_code)
+        tb = traceback.format_exc()
+        return PlainTextResponse(content=tb, status_code=500)
 
 @app.websocket("/relay/ws/{streams:path}")
 async def ws_proxy(websocket: WebSocket, streams: str):
